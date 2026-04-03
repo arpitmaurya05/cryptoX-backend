@@ -4,7 +4,6 @@ const cors = require("cors");
 require("dotenv").config();
 
 const authRoutes = require("./routes/Auth");
-
 const app = express();
 
 // ✅ Allow all localhost ports
