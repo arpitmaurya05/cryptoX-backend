@@ -3,7 +3,7 @@ const mongoose = require("mongoose");
 const cors = require("cors");
 require("dotenv").config();
 
-const authRoutes = require("./routes/Auth");
+const authRoutes = require("./routes/auth");
 const app = express();
 
 // ✅ Allow all localhost ports
