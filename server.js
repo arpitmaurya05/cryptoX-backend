@@ -13,7 +13,8 @@ app.use(cors({
     "http://localhost:5174",
     "http://localhost:5175",
     "http://localhost:3000",
-    "https://cryptico-frontend.vercel.app" 
+"https://cryptox-app-git-main-arpitmaurya262005-5472s-projects.vercel.app",
+"https://cryptox-app.vercel.app",
   ],
   methods: ["GET", "POST", "PUT", "DELETE"],
   credentials: false
