@@ -1,28 +1,73 @@
 const express = require("express");
 const router = express.Router();
+const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
-const { ethers } = require("ethers");
-const crypto = require("crypto");
 const User = require("../models/User");
+const { generateWallet, encryptPrivateKey, decryptPrivateKey } = require("../utils/wallet");
+ 
 
-const generateToken = (id) =>
-  jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: "7d" });
-
-const generateNonce = () => crypto.randomBytes(16).toString("hex");
-
+// ── Helper: generate JWT ──
+const generateToken = (id) => {
+  return jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: "7d" });
+};
+const auth = async (req, res, next) => {
+  const token = req.headers.authorization?.split(" ")[1];
+  if (!token) return res.status(401).json({ message: "No token" });
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.userId = decoded.id;
+    next();
+  } catch {
+    res.status(401).json({ message: "Invalid token" });
+  }
+};
 router.post("/signup", async (req, res) => {
   const { firstName, lastName, email, password } = req.body;
   try {
     if (!firstName || !lastName || !email || !password)
       return res.status(400).json({ message: "All fields are required" });
+
     const existing = await User.findOne({ email });
     if (existing)
       return res.status(400).json({ message: "Email already registered" });
-    const user = await User.create({ firstName, lastName, email, password, authType: "email" });
+
+    // Auto-generate wallet
+    const wallet = generateWallet();
+    const encryptedKey = encryptPrivateKey(wallet.privateKey, password);
+
+    // ✅ Verify wallet was generated before saving
+    if (!wallet.address || !encryptedKey) {
+      return res.status(500).json({ message: "Wallet generation failed" });
+    }
+
+    const user = await User.create({
+      firstName,
+      lastName,
+      email,
+      password,
+      walletAddress: wallet.address.toLowerCase(),
+      encryptedKey,
+    });
+
+    // ✅ Verify wallet was saved
+    if (!user.walletAddress) {
+      return res.status(500).json({ message: "Wallet not saved properly" });
+    }
+
     res.status(201).json({
       message: "Account created successfully",
       token: generateToken(user._id),
-      user: { id: user._id, firstName: user.firstName, lastName: user.lastName, email: user.email },
+      user: {
+        id: user._id,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        email: user.email,
+        phone: user.phone || "",
+        country: user.country || "",
+        bio: user.bio || "",
+        username: user.username || "",
+        walletAddress: user.walletAddress,
+      },
     });
   } catch (err) {
     console.error("SIGNUP ERROR:", err.message);
@@ -34,17 +79,41 @@ router.post("/login", async (req, res) => {
   const { email, password } = req.body;
   try {
     if (!email || !password)
-      return res.status(400).json({ message: "Email and password are required" });
+      return res.status(400).json({ message: "All fields are required" });
+
     const user = await User.findOne({ email });
     if (!user)
-      return res.status(401).json({ message: "Invalid email or password" });
-    const isMatch = await user.matchPassword(password);
+      return res.status(404).json({ message: "User not found" });
+
+    const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch)
-      return res.status(401).json({ message: "Invalid email or password" });
+      return res.status(401).json({ message: "Invalid credentials" });
+
+    // ✅ Auto-fix missing wallet on login
+    if (!user.walletAddress || !user.encryptedKey) {
+      console.log("⚠️ Generating missing wallet for:", email);
+      const wallet = generateWallet();
+      const encryptedKey = encryptPrivateKey(wallet.privateKey, password);
+      user.walletAddress = wallet.address.toLowerCase();
+      user.encryptedKey = encryptedKey;
+      await user.save();
+      console.log("✅ Wallet generated:", wallet.address);
+    }
+
     res.json({
       message: "Login successful",
       token: generateToken(user._id),
-      user: { id: user._id, firstName: user.firstName, lastName: user.lastName, email: user.email },
+      user: {
+        id: user._id,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        email: user.email,
+        phone: user.phone || "",
+        country: user.country || "",
+        bio: user.bio || "",
+        username: user.username || "",
+        walletAddress: user.walletAddress,
+      },
     });
   } catch (err) {
     console.error("LOGIN ERROR:", err.message);
@@ -52,88 +121,30 @@ router.post("/login", async (req, res) => {
   }
 });
 
-router.get("/metamask/nonce/:address", async (req, res) => {
-  const address = req.params.address.toLowerCase();
+router.put("/update-profile", auth, async (req, res) => {
   try {
-    let user = await User.findOne({ walletAddress: address });
-    if (!user) {
-      user = await User.create({ walletAddress: address, nonce: generateNonce(), authType: "metamask" });
-    } else {
-      user.nonce = generateNonce();
-      await user.save();
-    }
-    res.json({ nonce: user.nonce, message: `Sign this message to login to Cryptico: ${user.nonce}` });
-  } catch (err) {
-    console.error("NONCE ERROR:", err.message);
-    res.status(500).json({ message: err.message });
-  }
-});
-
-router.post("/metamask/verify", async (req, res) => {
-  const { address, signature } = req.body;
-  try {
-    if (!address || !signature)
-      return res.status(400).json({ message: "Address and signature required" });
-    const user = await User.findOne({ walletAddress: address.toLowerCase() });
-    if (!user)
-      return res.status(404).json({ message: "Wallet not found. Please try again." });
-    const message = `Sign this message to login to Cryptico: ${user.nonce}`;
-    const recoveredAddress = ethers.verifyMessage(message, signature);
-    if (recoveredAddress.toLowerCase() !== address.toLowerCase())
-      return res.status(401).json({ message: "Signature verification failed" });
-    user.nonce = generateNonce();
-    await user.save();
+    const { firstName, lastName, phone, country, bio, username } = req.body;
+    const user = await User.findByIdAndUpdate(
+      req.userId,
+      { firstName, lastName, phone, country, bio, username },
+      { new: true }
+    ).select("-password -encryptedKey");
     res.json({
-      message: "MetaMask login successful",
-      token: generateToken(user._id),
-      user: { id: user._id, walletAddress: user.walletAddress, authType: "metamask" },
+      message: "Profile updated successfully",
+      user: {
+        id: user._id,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        email: user.email,
+        phone: user.phone,
+        country: user.country,
+        bio: user.bio,
+        username: user.username,
+        walletAddress: user.walletAddress,
+      }
     });
   } catch (err) {
-    console.error("VERIFY ERROR:", err.message);
     res.status(500).json({ message: err.message });
-  }
-});
-
-router.post("/save-wallet", async (req, res) => {
-  const token = req.headers.authorization?.split(" ")[1];
-  if (!token) return res.status(401).json({ message: "No token" });
-  try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const { walletAddress } = req.body;
-    const user = await User.findByIdAndUpdate(
-      decoded.id,
-      { walletAddress: walletAddress ? walletAddress.toLowerCase() : null },
-      { new: true }
-    ).select("-password -nonce");
-    res.json({ message: "Wallet saved", user });
-  } catch (err) {
-    console.error("SAVE WALLET ERROR:", err.message);
-    res.status(401).json({ message: "Invalid token" });
-  }
-});
-
-router.get("/get-wallet", async (req, res) => {
-  const token = req.headers.authorization?.split(" ")[1];
-  if (!token) return res.status(401).json({ message: "No token" });
-  try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const user = await User.findById(decoded.id).select("walletAddress");
-    res.json({ walletAddress: user.walletAddress || null });
-  } catch (err) {
-    console.error("GET WALLET ERROR:", err.message);
-    res.status(401).json({ message: "Invalid token" });
-  }
-});
-
-router.get("/me", async (req, res) => {
-  const token = req.headers.authorization?.split(" ")[1];
-  if (!token) return res.status(401).json({ message: "No token" });
-  try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const user = await User.findById(decoded.id).select("-password -nonce");
-    res.json(user);
-  } catch (err) {
-    res.status(401).json({ message: "Invalid token" });
   }
 });
 

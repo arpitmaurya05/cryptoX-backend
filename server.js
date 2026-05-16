@@ -4,9 +4,10 @@ const cors = require("cors");
 require("dotenv").config();
 
 const authRoutes = require("./routes/auth");
+const walletRoutes = require("./routes/walletRoutes"); // ← move to top
+
 const app = express();
 
-// ✅ Allow all localhost ports
 app.use(cors({
   origin: [
     "http://localhost:5173",
@@ -22,12 +23,14 @@ app.use(cors({
 
 app.use(express.json());
 
+// ← Routes registered before listen
 app.use("/api/auth", authRoutes);
+app.use("/api/wallet", walletRoutes); // ← properly registered
 
 mongoose
   .connect(process.env.MONGO_URI)
   .then(() => console.log("✅ MongoDB connected"))
   .catch((err) => console.log("❌ MongoDB error:", err));
 
-const PORT = process.env.PORT || 10000;
+const PORT = process.env.PORT || 8000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
